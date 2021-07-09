@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 // Package consistenthash provides an implementation of a ring hash.
+// 有序hash环，其中包含虚拟节点。
 package consistenthash
 
 import (
@@ -23,6 +24,7 @@ import (
 	"strconv"
 )
 
+// Hash 自定义hash函数
 type Hash func(data []byte) uint32
 
 type Map struct {
@@ -33,11 +35,14 @@ type Map struct {
 }
 
 func New(replicas int, fn Hash) *Map {
+	// replicas: 虚拟节点个数；
+	// fn: 传入的自定义hash函数
 	m := &Map{
 		replicas: replicas,
 		hash:     fn,
 		hashMap:  make(map[int]string),
 	}
+	// 默认的hash函数。
 	if m.hash == nil {
 		m.hash = crc32.ChecksumIEEE
 	}
@@ -51,6 +56,7 @@ func (m *Map) IsEmpty() bool {
 
 // Add adds some keys to the hash.
 func (m *Map) Add(keys ...string) {
+	// 对每个key都分配m.replicas个节点。
 	for _, key := range keys {
 		for i := 0; i < m.replicas; i++ {
 			hash := int(m.hash([]byte(strconv.Itoa(i) + key)))
@@ -58,6 +64,7 @@ func (m *Map) Add(keys ...string) {
 			m.hashMap[hash] = key
 		}
 	}
+	// 哈希环需要排序，因为要找到第一个>=哈希值的节点。
 	sort.Ints(m.keys)
 }
 
@@ -67,12 +74,15 @@ func (m *Map) Get(key string) string {
 		return ""
 	}
 
+	// 注意这里计算hash时输入和上面Add的不同，也是因为，只需要找到最近的那个节点，不需要完全匹配。
 	hash := int(m.hash([]byte(key)))
 
 	// Binary search for appropriate replica.
+	// 使用二分查找第一个>=hash的节点的key。
 	idx := sort.Search(len(m.keys), func(i int) bool { return m.keys[i] >= hash })
 
 	// Means we have cycled back to the first replica.
+	// 当查不到比hash大的key时，就返回第一个。
 	if idx == len(m.keys) {
 		idx = 0
 	}
