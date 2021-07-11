@@ -38,6 +38,8 @@ import (
 )
 
 // A Getter loads data for a key.
+// Getter为用户需要注册给groupcache的部分；
+// 当没有被缓存的时候，调用Getter回调函数到数据源获取value。
 type Getter interface {
 	// Get returns the value identified by key, populating dest.
 	//
@@ -49,8 +51,10 @@ type Getter interface {
 }
 
 // A GetterFunc implements Getter with a function.
+// 函数类型实现某一个接口，称之为接口型函数，方便使用者在调用时既能够传入函数作为参数，也能够传入实现了该接口的结构体作为参数。
 type GetterFunc func(ctx context.Context, key string, dest Sink) error
 
+// 定义一个函数类型GetterFunc，实现Getter接口中的Get方法，在这个方法中调用自己，就将一个其他函数转换成了接口Getter
 func (f GetterFunc) Get(ctx context.Context, key string, dest Sink) error {
 	return f(ctx, key, dest)
 }
@@ -106,6 +110,7 @@ func newGroup(name string, cacheBytes int64, getter Getter, peers PeerPicker) *G
 	if fn := newGroupHook; fn != nil {
 		fn(g)
 	}
+	// 将新建的Group添加到全局的groups中，kv的形式，根据不同的name区别不同的group。
 	groups[name] = g
 	return g
 }
@@ -140,17 +145,17 @@ func callInitPeerServer() {
 // A Group is a cache namespace and associated data loaded spread over
 // a group of 1 or more machines.
 type Group struct {
-	name       string
-	getter     Getter
+	name       string		// 每个Group都有一个name，可以创建多个名字不同的Group
+	getter     Getter		// 缓存失效时从源数据的回调函数
 	peersOnce  sync.Once
-	peers      PeerPicker
+	peers      PeerPicker	// 与http部分进行联结的接口
 	cacheBytes int64 // limit for sum of mainCache and hotCache size
 
 	// mainCache is a cache of the keys for which this process
 	// (amongst its peers) is authoritative. That is, this cache
 	// contains keys which consistent hash on to this process's
 	// peer number.
-	mainCache cache
+	mainCache cache			// 分布式中本地分配到的cache部分
 
 	// hotCache contains keys/values for which this peer is not
 	// authoritative (otherwise they would be in mainCache), but
@@ -160,12 +165,12 @@ type Group struct {
 	// network card could become the bottleneck on a popular key.
 	// This cache is used sparingly to maximize the total number
 	// of key/value pairs that can be stored globally.
-	hotCache cache
+	hotCache cache			// 分布式中非本地的被本地访问过的cache部分
 
 	// loadGroup ensures that each key is only fetched once
 	// (either locally or remotely), regardless of the number of
 	// concurrent callers.
-	loadGroup flightGroup
+	loadGroup flightGroup	// 为fiightGroup是一个合并操作的部分
 
 	_ int32 // force Stats to be 8-byte aligned on 32-bit platforms
 
@@ -211,13 +216,17 @@ func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
 	if dest == nil {
 		return errors.New("groupcache: nil dest Sink")
 	}
+	// 现在mainCache中查询缓存，存在直接返回value
 	value, cacheHit := g.lookupCache(key)
 
 	if cacheHit {
 		g.Stats.CacheHits.Add(1)
 		return setSinkView(dest, value)
 	}
-
+	// 缓存不存在，则调用 load 方法；
+	// load 调用 getLocally（分布式场景下会调用 getFromPeer 从其他节点获取）；
+	// getLocally 调用用户回调函数 g.getter.Get() 获取源数据；
+	// 并且将源数据添加到缓存 mainCache 中（通过 populateCache 方法）
 	// Optimization to avoid double unmarshalling or copying: keep
 	// track of whether the dest was already populated. One caller
 	// (if local) will set this; the losers will not. The common
@@ -234,6 +243,9 @@ func (g *Group) Get(ctx context.Context, key string, dest Sink) error {
 }
 
 // load loads key either by invoking the getter locally or by sending it to another machine.
+// 使用 PickPeer() 方法选择节点；
+// 若非本机节点，则调用 getFromPeer() 从远程获取；
+// 若是本机节点或失败，则回退到 getLocally()。
 func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView, destPopulated bool, err error) {
 	g.Stats.Loads.Add(1)
 	viewi, err := g.loadGroup.Do(key, func() (interface{}, error) {
@@ -258,6 +270,8 @@ func (g *Group) load(ctx context.Context, key string, dest Sink) (value ByteView
 		// 1: fn()
 		// 2: loadGroup.Do("key", fn)
 		// 2: fn()
+
+		// 这里又查一次。
 		if value, cacheHit := g.lookupCache(key); cacheHit {
 			g.Stats.CacheHits.Add(1)
 			return value, nil
@@ -301,12 +315,14 @@ func (g *Group) getLocally(ctx context.Context, key string, dest Sink) (ByteView
 	return dest.view()
 }
 
+// 实现了 PeerGetter 接口的 httpGetter 从访问远程节点，获取缓存值。
 func (g *Group) getFromPeer(ctx context.Context, peer ProtoGetter, key string) (ByteView, error) {
 	req := &pb.GetRequest{
 		Group: &g.name,
 		Key:   &key,
 	}
 	res := &pb.GetResponse{}
+	// 从peer中进行查找。
 	err := peer.Get(ctx, req, res)
 	if err != nil {
 		return ByteView{}, err
@@ -325,6 +341,7 @@ func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
 	if g.cacheBytes <= 0 {
 		return
 	}
+	// 先在mainCache中查，没有再在hotCache中查。
 	value, ok = g.mainCache.get(key)
 	if ok {
 		return
@@ -334,6 +351,7 @@ func (g *Group) lookupCache(key string) (value ByteView, ok bool) {
 }
 
 func (g *Group) populateCache(key string, value ByteView, cache *cache) {
+	// 因为没查到，所以要把这个数据刷到缓存中，可能需要缓存淘汰。
 	if g.cacheBytes <= 0 {
 		return
 	}
@@ -387,6 +405,7 @@ func (g *Group) CacheStats(which CacheType) CacheStats {
 // cache is a wrapper around an *lru.Cache that adds synchronization,
 // makes values always be ByteView, and counts the size of all keys and
 // values.
+// 下面就是基于lru的并发安全的缓存。
 type cache struct {
 	mu         sync.RWMutex
 	nbytes     int64 // of all keys and values

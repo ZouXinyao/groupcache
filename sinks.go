@@ -26,6 +26,8 @@ import (
 //
 // Implementation of Getter must call exactly one of the Set methods
 // on success.
+// Sink是从Get调用接受数据的接口；
+// Getter必须要调用以下set方法之一。
 type Sink interface {
 	// SetString sets the value to s.
 	SetString(s string) error
@@ -36,6 +38,7 @@ type Sink interface {
 
 	// SetProto sets the value to the encoded version of m.
 	// The caller retains ownership of m.
+	// 根据编码来设置m
 	SetProto(m proto.Message) error
 
 	// view returns a frozen view of the bytes for caching.
@@ -48,6 +51,7 @@ func cloneBytes(b []byte) []byte {
 	return c
 }
 
+// 将视图的中的数组赋给Sink
 func setSinkView(s Sink, v ByteView) error {
 	// A viewSetter is a Sink that can also receive its value from
 	// a ByteView. This is a fast path to minimize copies when the
@@ -66,6 +70,7 @@ func setSinkView(s Sink, v ByteView) error {
 }
 
 // StringSink returns a Sink that populates the provided string pointer.
+// 创建一个带有sp字符串指针的stringSink，这时只有传入字符串的指针，还没有视图
 func StringSink(sp *string) Sink {
 	return &stringSink{sp: sp}
 }
@@ -81,6 +86,7 @@ func (s *stringSink) view() (ByteView, error) {
 	return s.v, nil
 }
 
+// SetString Set方法不仅会改原数据，也会将视图修改。
 func (s *stringSink) SetString(v string) error {
 	s.v.b = nil
 	s.v.s = v
@@ -103,6 +109,7 @@ func (s *stringSink) SetProto(m proto.Message) error {
 }
 
 // ByteViewSink returns a Sink that populates a ByteView.
+// 创建带视图的Sink
 func ByteViewSink(dst *ByteView) Sink {
 	if dst == nil {
 		panic("nil dst")
@@ -152,6 +159,7 @@ func (s *byteViewSink) SetString(v string) error {
 }
 
 // ProtoSink returns a sink that unmarshals binary proto values into m.
+// ProtoSink 用来创建一个proto解析后的sink
 func ProtoSink(m proto.Message) Sink {
 	return &protoSink{
 		dst: m,
@@ -211,6 +219,7 @@ func (s *protoSink) SetProto(m proto.Message) error {
 // AllocatingByteSliceSink returns a Sink that allocates
 // a byte slice to hold the received value and assigns
 // it to *dst. The memory is not retained by groupcache.
+// AllocatingByteSliceSink创建了一个将所有值都传给dst的sink，groupcache不会保存？
 func AllocatingByteSliceSink(dst *[]byte) Sink {
 	return &allocBytesSink{dst: dst}
 }
@@ -270,6 +279,7 @@ func (s *allocBytesSink) SetString(v string) error {
 // bytes to *dst. If more bytes are available, they're silently
 // truncated. If fewer bytes are available than len(*dst), *dst
 // is shrunk to fit the number of bytes available.
+// 与allocBytesSink一样，但是限制了长度。
 func TruncatingByteSliceSink(dst *[]byte) Sink {
 	return &truncBytesSink{dst: dst}
 }

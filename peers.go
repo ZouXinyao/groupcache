@@ -24,9 +24,15 @@ import (
 	pb "github.com/golang/groupcache/groupcachepb"
 )
 
+// groupcache与http的接口
+
+// Context is an alias to context.Context for backwards compatibility purposes.
+type Context = context.Context
+
 // ProtoGetter is the interface that must be implemented by a peer.
 type ProtoGetter interface {
-	Get(context context.Context, in *pb.GetRequest, out *pb.GetResponse) error
+	// 从对应 group 查找缓存值。
+	Get(ctx context.Context, in *pb.GetRequest, out *pb.GetResponse) error
 }
 
 // PeerPicker is the interface that must be implemented to locate
@@ -35,6 +41,7 @@ type PeerPicker interface {
 	// PickPeer returns the peer that owns the specific key
 	// and true to indicate that a remote peer was nominated.
 	// It returns nil, false if the key owner is the current peer.
+	// 根据传入的 key 选择相应节点 PeerGetter。
 	PickPeer(key string) (peer ProtoGetter, ok bool)
 }
 
@@ -51,6 +58,7 @@ var (
 // It is called once, when the first group is created.
 // Either RegisterPeerPicker or RegisterPerGroupPeerPicker should be
 // called exactly once, but not both.
+//  实现了 PeerPicker 接口的 HTTPPool 注入到 Group 中
 func RegisterPeerPicker(fn func() PeerPicker) {
 	if portPicker != nil {
 		panic("RegisterPeerPicker called more than once")
@@ -70,6 +78,7 @@ func RegisterPerGroupPeerPicker(fn func(groupName string) PeerPicker) {
 	portPicker = fn
 }
 
+// 提供给groupcache使用。
 func getPeers(groupName string) PeerPicker {
 	if portPicker == nil {
 		return NoPeers{}
